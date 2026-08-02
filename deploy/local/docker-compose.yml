@@ -1,0 +1,16 @@
+
+services:
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.104.0
+    container_name: otel-collector
+    command: ["--config=/etc/otel/config.yaml"]
+    volumes:
+      - ./otel-collector-config.yaml:/etc/otel/config.yaml
+    ports:
+      - "4317:4317" #gRPC Port
+      - "4318:4318" #http Port
+      - "8888:8888" # Metrics Collections
+    environment:
+      - SUMO_HTTP_SOURCE_URL=${SUMO_HTTP_SOURCE_URL}
+      - NEW_RELIC_LICENSE_KEY=${NEW_RELIC_LICENSE_KEY}
+    restart: unless-stopped

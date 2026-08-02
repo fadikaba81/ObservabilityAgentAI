@@ -4,17 +4,24 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
+	"time"
+)
+
+var (
+	pollInterval = 5 * time.Second
+	pollTimeout  = 5 * time.Minute
 )
 
 func (c *Client) CreateSearchJob(query, from, to string) (*SearchJobResponse, error) {
 	payload := SearchJobRequest{
-		Query: query,
-		From: from, 
-		To: to,
+		Query:    query,
+		From:     from,
+		To:       to,
 		TimeZone: "UTC",
 	}
-	
+
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return nil, fmt.Errorf("Failed to marchel search job request: %w", err)
@@ -36,14 +43,75 @@ func (c *Client) CreateSearchJob(query, from, to string) (*SearchJobResponse, er
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusAccepted {
-        return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
-    }
+		return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+	}
 
 	var result SearchJobResponse
 
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-        return nil, fmt.Errorf("failed to decode response: %w", err)
-    }
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
 
-    return &result, nil
-}	
+	return &result, nil
+}
+
+func (c *Client) GetSearchJobStatus(jobID string) (*SearchJobStatus, error) {
+	req, err := http.NewRequest("GET", fmt.Sprintf("%s/searchJob/%s", c.endpoint, jobID), nil)
+
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("Accept", "application/json")
+	req.SetBasicAuth(c.accessID, c.accessKey)
+
+	resp, err := c.httpClient.Do(req)
+
+	if err != nil {
+		return nil, fmt.Errorf("failed to execute request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+	}
+
+	var status SearchJobStatus
+
+	if err := json.NewDecoder(resp.Body).Decode(&status); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	return &status, nil
+
+}
+func (c *Client) WaitForSearchJob(jobID string) (*SearchJobStatus, error) {
+	ticker := time.NewTicker(pollInterval)
+	timeout := time.After(pollTimeout)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-timeout:
+			slog.Error("search job timed out", "jobID", jobID, "timeout", pollTimeout)
+			return nil, fmt.Errorf("search job %s timed out", jobID)
+
+		case <-ticker.C:
+			status, err := c.GetSearchJobStatus(jobID)
+			if err != nil {
+				slog.Error("failed to get search job status", "jobID", jobID, "error", err)
+				return nil, err
+			}
+
+			switch status.State {
+			case "DONE GATHERING RESULTS":
+				slog.Info("search job completed", "jobID", jobID, "messageCount", status.MessageCount)
+				return status, nil
+			case "CANCELLED", "FAILED":
+				slog.Error("search job failed", "jobID", jobID, "state", status.State)
+				return nil, fmt.Errorf("search job %s ended with state: %s", jobID, status.State)
+			}
+		}
+	}
+
+}

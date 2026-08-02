@@ -20,7 +20,7 @@ func Init(cfg *config.Config) func() {
 
 	res, err := resource.New(context.Background(),
 		resource.WithAttributes(
-			attribute.String("serivce.name", cfg.ServiceName),
+			attribute.String("service.name", cfg.ServiceName),
 			attribute.String("deployment.environment", cfg.Environment),
 		),
 	)
@@ -35,7 +35,7 @@ func Init(cfg *config.Config) func() {
 	slog.Info("telemetry initialised",
 		"service", cfg.ServiceName,
 		"environment", cfg.Environment,
-		"endpoint", cfg.OTelExporter,
+		"endpoint", cfg.OTelEndpoint,
 	)
 
 	return func() {
@@ -48,7 +48,7 @@ func Init(cfg *config.Config) func() {
 func initTracer(cfg *config.Config, res *resource.Resource) func() {
 	exporter, err := otlptracehttp.New(
 		context.Background(),
-		otlptracehttp.WithEndpoint(cfg.OTelExporter),
+		otlptracehttp.WithEndpoint(cfg.OTelEndpoint),
 		otlptracehttp.WithInsecure(),
 	)
 	if err != nil {

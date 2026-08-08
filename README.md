@@ -166,7 +166,3 @@ flowchart LR
 ```
 
 Swapping to production = change env vars only, zero code changes.
-
-## License
-
-MIT

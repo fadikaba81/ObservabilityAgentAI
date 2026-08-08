@@ -2,11 +2,14 @@ package sumologic
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"time"
+
+	"github.com/fadikaba81/ObservabilityAgentAI/internal/telemetry"
 )
 
 var (
@@ -56,7 +59,7 @@ func (c *Client) CreateSearchJob(query, from, to string) (*SearchJobResponse, er
 }
 
 func (c *Client) GetSearchJobStatus(jobID string) (*SearchJobStatus, error) {
-	req, err := http.NewRequest("GET", fmt.Sprintf("%s/searchJob/%s", c.endpoint, jobID), nil)
+	req, err := http.NewRequest("GET", fmt.Sprintf("%s/searchJobs/%s", c.endpoint, jobID), nil)
 
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
@@ -86,6 +89,8 @@ func (c *Client) GetSearchJobStatus(jobID string) (*SearchJobStatus, error) {
 
 }
 func (c *Client) WaitForSearchJob(jobID string) (*SearchJobStatus, error) {
+	start := time.Now()
+
 	ticker := time.NewTicker(pollInterval)
 	timeout := time.After(pollTimeout)
 	defer ticker.Stop()
@@ -106,6 +111,7 @@ func (c *Client) WaitForSearchJob(jobID string) (*SearchJobStatus, error) {
 			switch status.State {
 			case "DONE GATHERING RESULTS":
 				slog.Info("search job completed", "jobID", jobID, "messageCount", status.MessageCount)
+				telemetry.RecordSumoLogicDuration(context.Background(), time.Since(start))
 				return status, nil
 			case "CANCELLED", "FAILED":
 				slog.Error("search job failed", "jobID", jobID, "state", status.State)

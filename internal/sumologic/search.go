@@ -43,11 +43,11 @@ func (c *Client) CreateSearchJob(query, from, to string) (*SearchJobResponse, er
 	if err != nil {
 		return nil, fmt.Errorf("Failed to execute request: %w", err)
 	}
-	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusAccepted {
 		return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
 	}
+	defer resp.Body.Close()
 
 	var result SearchJobResponse
 
@@ -120,4 +120,43 @@ func (c *Client) WaitForSearchJob(jobID string) (*SearchJobStatus, error) {
 		}
 	}
 
+}
+
+func (c *Client) GetSearchJobMessages(jobID string, totalCount int) ([]SearchJobMessage, error) {
+	var (
+		allMessages []SearchJobMessage
+		offset      = 0
+		limit       = 100
+	)
+
+	for offset < totalCount {
+
+		url := fmt.Sprintf("%s/searchJobs/%s/messages?offset=%d&limit=%d",
+			c.endpoint, jobID, offset, limit)
+
+		req, err := http.NewRequest("GET", url, nil)
+		if err != nil {
+			return nil, fmt.Errorf("Failed to create the request: %w", err)
+		}
+
+		req.Header.Set("Accept", "application/json")
+		req.SetBasicAuth(c.accessID, c.accessKey)
+
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("failed to execute request: %w", err)
+		}
+		
+		var result SearchJobMessageResponse
+		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+			return nil, fmt.Errorf("failed to decode the response: %w", err)
+		}
+		resp.Body.Close()
+
+		allMessages = append(allMessages, result.Messages...)
+
+		offset += limit
+	}
+
+	return allMessages, nil
 }

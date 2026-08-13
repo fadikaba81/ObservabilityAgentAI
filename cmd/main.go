@@ -16,6 +16,13 @@ func main() {
 	shutdown := telemetry.Init(cfg)
 	defer shutdown()
 
+	err := telemetry.InitMetrics()
+
+	if err != nil {
+		slog.Error("failed to init metrics", "error", err)
+		os.Exit(1)
+	}
+
 	slog.Info("ObsAIAgent Starting",
 		"service", cfg.ServiceName,
 		"environment", cfg.Environment,

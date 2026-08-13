@@ -146,7 +146,7 @@ func (c *Client) GetSearchJobMessages(jobID string, totalCount int) ([]SearchJob
 		if err != nil {
 			return nil, fmt.Errorf("failed to execute request: %w", err)
 		}
-		
+
 		var result SearchJobMessageResponse
 		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 			return nil, fmt.Errorf("failed to decode the response: %w", err)

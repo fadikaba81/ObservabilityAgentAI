@@ -16,9 +16,9 @@ type Client struct {
 func NewClient(endpoint string) *Client {
 	return &Client{
 		httpClient: &http.Client{Timeout: 30 * time.Second},
-		endpoint:   endpoint,
+		endpoint:   "https://api.newrelic.com/graphql",
 		apiKey:     os.Getenv("NEWRELIC_APIKEY_SANDBOX"),
-		accountID:  os.Getenv("NEWREIC_ACCOUNTID_SANDBOX"),
+		accountID:  os.Getenv("NEWRELIC_ACCOUNTID_SANDBOX"),
 	}
 
 }

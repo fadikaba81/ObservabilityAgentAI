@@ -13,7 +13,7 @@ type Client struct {
 	accountID  string
 }
 
-func NewClient(endpoint string) *Client {
+func NewClient() *Client {
 	return &Client{
 		httpClient: &http.Client{Timeout: 30 * time.Second},
 		endpoint:   "https://api.newrelic.com/graphql",

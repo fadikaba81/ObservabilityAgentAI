@@ -1,52 +1,95 @@
 package main
 
 import (
+	"context"
+	"errors"
+	"flag"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/fadikaba81/ObservabilityAgentAI/config"
-	"github.com/fadikaba81/ObservabilityAgentAI/internal/telemetry"
-
 	"github.com/fadikaba81/ObservabilityAgentAI/internal/newrelic"
+	"github.com/fadikaba81/ObservabilityAgentAI/internal/output"
+	"github.com/fadikaba81/ObservabilityAgentAI/internal/pipeline"
+	"github.com/fadikaba81/ObservabilityAgentAI/internal/reasoner"
 	"github.com/fadikaba81/ObservabilityAgentAI/internal/sumologic"
+	"github.com/fadikaba81/ObservabilityAgentAI/internal/telemetry"
 	"github.com/fadikaba81/ObservabilityAgentAI/internal/webhook"
+	"github.com/fadikaba81/ObservabilityAgentAI/pkg/models"
 )
 
+const pipelineTimeout = 10 * time.Minute
+
 func main() {
-	cfg := config.Load()
+	dryRun := flag.Bool("dry-run", false, "print the report to stdout instead of sending email")
+	flag.Parse()
+	if *dryRun {
+		_ = os.Setenv("DRY_RUN", "true")
+	}
 
-	shutdown := telemetry.Init(cfg)
-	defer shutdown()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
 
-	err := telemetry.InitMetrics()
-
+	cfg, err := config.Load()
 	if err != nil {
-		slog.Error("failed to init metrics", "error", err)
+		slog.Error("config.invalid", "error", err)
 		os.Exit(1)
 	}
 
-	sumoClient := sumologic.NewClient(cfg.SumoEndpoint)
-	newrelicClient := newrelic.NewClient()
+	if cfg.OTelEnabled {
+		shutdown := telemetry.Init(cfg)
+		defer shutdown()
+	}
 
-	handler := webhook.NewHandler(sumoClient, newrelicClient)
+	pl := &pipeline.Pipeline{
+		NewRelic:      newrelic.NewClient(),
+		Sumo:          sumologic.NewClient(cfg.SumoEndpoint),
+		LLM:           reasoner.NewClient(cfg.AnthropicAPIKey, cfg.AnthropicModel),
+		Mailer:        output.NewMailer(cfg.SMTPHost, cfg.SMTPPort, cfg.SMTPUsername, cfg.SMTPPassword, cfg.EmailFrom, cfg.EmailTo),
+		ServiceField:  cfg.SumoServiceField,
+		DefaultWindow: cfg.QueryWindow,
+		DryRun:        cfg.DryRun,
+		Out:           os.Stdout,
+	}
 
-	http.HandleFunc("/webhook", handler.HandleAlert)
+	handler := webhook.NewHandler(cfg.WebhookSecret, func(a models.Alert) {
+		ctx, cancel := context.WithTimeout(context.Background(), pipelineTimeout)
+		defer cancel()
+		if err := pl.Run(ctx, a); err != nil {
+			slog.Error("pipeline.failed", "alert_id", a.ID, "service", a.Service, "error", err)
+		}
+	})
 
-	slog.Info("ObsAIAgent Starting",
-		"service", cfg.ServiceName,
-		"environment", cfg.Environment,
-	)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/webhook", handler.ServeHTTP)
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
 
-	go http.ListenAndServe(fmt.Sprintf(":%d", cfg.WebhookPort), nil)
+	srv := &http.Server{
+		Addr:              fmt.Sprintf(":%d", cfg.WebhookPort),
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,
+	}
 
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, syscall.SIGTERM, syscall.SIGINT)
-	<-quit
+	go func() {
+		slog.Info("agent.listening", "port", cfg.WebhookPort, "dry_run", cfg.DryRun, "service", cfg.ServiceName)
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			slog.Error("server.failed", "error", err)
+			os.Exit(1)
+		}
+	}()
 
-	slog.Info("ObsAIAgent shutting down")
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, syscall.SIGTERM, syscall.SIGINT)
+	<-stop
 
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_ = srv.Shutdown(ctx)
+	slog.Info("agent.stopped")
 }

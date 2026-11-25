@@ -3,59 +3,105 @@ package newrelic
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
+	"strconv"
+	"strings"
+	"time"
 )
 
-func (c *Client) QueryErrorRate(service string, queryWindow string) (float64, error) {
-	nrql := fmt.Sprintf(
-		"SELECT percentage(count(*), WHERE error is true) FROM Transaction WHERE appName='%s' SINCE %s ago",
-		service,
-		queryWindow,
-	)
+const nerdGraphQuery = `query($accountId: Int!, $nrql: Nrql!) {
+  actor { account(id: $accountId) { nrql(query: $nrql) { results } } }
+}`
 
-	query := NerdGraphRequest{
-		Query: fmt.Sprintf(
-			`{ actor { account(id: "%s") { nrql(query: "%s") {results }}} }`,
-			c.accountID,
-			nrql,
-		),
-	}
+// Window is the time range an alert covers.
+type Window struct {
+	Start time.Time
+	End   time.Time
+}
 
-	body, err := json.Marshal(query)
+// RunNRQL executes an NRQL query through NerdGraph and returns the result rows.
+// The account ID and NRQL are sent as GraphQL variables, not spliced into the query.
+func (c *Client) RunNRQL(nrql string) ([]map[string]any, error) {
+	accountID, err := strconv.Atoi(c.accountID)
 	if err != nil {
-		return 0, fmt.Errorf("failed to Marshal request: %w", err)
+		return nil, fmt.Errorf("NEWRELIC_ACCOUNTID_SANDBOX must be numeric: %w", err)
 	}
 
-	req, err := http.NewRequest("POST", c.endpoint, bytes.NewBuffer(body))
+	body, err := json.Marshal(NerdGraphRequest{
+		Query:     nerdGraphQuery,
+		Variables: map[string]any{"accountId": accountID, "nrql": nrql},
+	})
 	if err != nil {
-		return 0, fmt.Errorf("Failed to create request: %w", err)
+		return nil, fmt.Errorf("marshal request: %w", err)
 	}
 
+	req, err := http.NewRequest(http.MethodPost, c.endpoint, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Api-Key", c.apiKey)
+	req.Header.Set("API-Key", c.apiKey)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return 0, fmt.Errorf("Failed to execute request: %w", err)
+		return nil, fmt.Errorf("execute request: %w", err)
 	}
 	defer resp.Body.Close()
 
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 10<<20))
+	if err != nil {
+		return nil, fmt.Errorf("read response: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("new relic returned %d: %s", resp.StatusCode, truncate(string(raw), 300))
+	}
+
 	var result NerdGraphResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return 0, fmt.Errorf("Failed to decode response: %w", err)
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return nil, fmt.Errorf("decode response: %w", err)
+	}
+	if len(result.Errors) > 0 {
+		msgs := make([]string, 0, len(result.Errors))
+		for _, e := range result.Errors {
+			msgs = append(msgs, e.Message)
+		}
+		return nil, errors.New("new relic query failed: " + strings.Join(msgs, "; "))
 	}
 
-	results := result.Data.Actor.Account.NRQL.Results
-	if len(results) == 0 {
-		return 0, nil
+	return result.Data.Actor.Account.NRQL.Results, nil
+}
+
+// ServiceMetrics returns request count, error percentage, and duration stats
+// for an application within the window.
+func (c *Client) ServiceMetrics(app string, w Window) ([]map[string]any, error) {
+	return c.RunNRQL(fmt.Sprintf(
+		"SELECT count(*), percentage(count(*), WHERE error IS true), average(duration), percentile(duration, 95), max(duration) "+
+			"FROM Transaction WHERE appName = %s SINCE %d UNTIL %d",
+		nrqlString(app), w.Start.UnixMilli(), w.End.UnixMilli(),
+	))
+}
+
+// SlowTraces returns the slowest transactions, with their trace IDs, for an
+// application within the window.
+func (c *Client) SlowTraces(app string, w Window, limit int) ([]map[string]any, error) {
+	return c.RunNRQL(fmt.Sprintf(
+		"SELECT traceId, name, duration, error FROM Transaction "+
+			"WHERE appName = %s AND traceId IS NOT NULL SINCE %d UNTIL %d ORDER BY duration DESC LIMIT %d",
+		nrqlString(app), w.Start.UnixMilli(), w.End.UnixMilli(), limit,
+	))
+}
+
+// nrqlString quotes a value as an NRQL string literal.
+func nrqlString(s string) string {
+	return "'" + strings.NewReplacer(`\`, `\\`, `'`, `\'`).Replace(s) + "'"
+}
+
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
 	}
-
-	errorRate, ok := results[0]["percentage"].(float64)
-	if !ok {
-		return 0, fmt.Errorf("failed to extract error rate from results")
-	}
-
-	return errorRate, nil
-
+	return s[:n] + "..."
 }

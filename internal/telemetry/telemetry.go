@@ -3,6 +3,7 @@ package telemetry
 import (
 	"context"
 	"log/slog"
+	"net/url"
 	"os"
 
 	"github.com/fadikaba81/ObservabilityAgentAI/config"
@@ -45,10 +46,19 @@ func Init(cfg *config.Config) func() {
 
 }
 
+// endpointHost strips the scheme and path, because the OTLP HTTP exporters
+// take host:port (the scheme is set by WithInsecure).
+func endpointHost(endpoint string) string {
+	if u, err := url.Parse(endpoint); err == nil && u.Host != "" {
+		return u.Host
+	}
+	return endpoint
+}
+
 func initTracer(cfg *config.Config, res *resource.Resource) func() {
 	exporter, err := otlptracehttp.New(
 		context.Background(),
-		otlptracehttp.WithEndpoint(cfg.OTelEndpoint),
+		otlptracehttp.WithEndpoint(endpointHost(cfg.OTelEndpoint)),
 		otlptracehttp.WithInsecure(),
 	)
 	if err != nil {
@@ -73,7 +83,7 @@ func initTracer(cfg *config.Config, res *resource.Resource) func() {
 func initMeter(cfg *config.Config, res *resource.Resource) func() {
 	exporter, err := otlpmetrichttp.New(
 		context.Background(),
-		otlpmetrichttp.WithEndpoint(cfg.OTelEndpoint),
+		otlpmetrichttp.WithEndpoint(endpointHost(cfg.OTelEndpoint)),
 		otlpmetrichttp.WithInsecure(),
 	)
 	if err != nil {

@@ -205,6 +205,3 @@ The agent must be reachable from Sumo's cloud, so it needs a public HTTPS endpoi
 - **Build not run on the full module set.** The code is checked with `gofmt`, `go vet` and mock tests. Run `go build ./...` and `go test ./...` on a machine with module access.
 - **Dependency on OpenTelemetry packages.** `internal/telemetry` still imports the OTel modules. They are only used when `OTEL_ENABLED=true`.
 
-## License
-
-TBD

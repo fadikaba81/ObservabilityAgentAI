@@ -12,6 +12,7 @@ import (
 	"github.com/fadikaba81/ObservabilityAgentAI/internal/output"
 	"github.com/fadikaba81/ObservabilityAgentAI/internal/reasoner"
 	"github.com/fadikaba81/ObservabilityAgentAI/internal/sumologic"
+	"github.com/fadikaba81/ObservabilityAgentAI/internal/telemetry"
 	"github.com/fadikaba81/ObservabilityAgentAI/pkg/models"
 )
 
@@ -38,6 +39,8 @@ type Pipeline struct {
 // warnings and the analysis proceeds with whatever data was collected.
 func (p *Pipeline) Run(ctx context.Context, alert models.Alert) error {
 	started := time.Now()
+	defer func() { telemetry.RecordAgentDuration(ctx, time.Since(started)) }()
+
 	w := p.window(alert)
 	nrWindow := newrelic.Window{Start: w.Start, End: w.End}
 
@@ -46,27 +49,35 @@ func (p *Pipeline) Run(ctx context.Context, alert models.Alert) error {
 
 	bundle := reasoner.Bundle{Alert: alert, Start: w.Start, End: w.End}
 
+	t := time.Now()
 	metrics, err := p.NewRelic.ServiceMetrics(alert.Service, nrWindow)
+	telemetry.RecordNewRelicDuration(ctx, time.Since(t), "metrics")
 	if err != nil {
 		bundle.Warnings = append(bundle.Warnings, "New Relic metrics unavailable: "+err.Error())
 	}
 	bundle.Metrics = metrics
 
+	t = time.Now()
 	traces, err := p.NewRelic.SlowTraces(alert.Service, nrWindow, traceLimit)
+	telemetry.RecordNewRelicDuration(ctx, time.Since(t), "traces")
 	if err != nil {
 		bundle.Warnings = append(bundle.Warnings, "New Relic traces unavailable: "+err.Error())
 	}
 	bundle.Traces = traces
 
 	query := fmt.Sprintf(`%s="%s" (error OR exception OR warn OR timeout OR fatal)`, p.ServiceField, alert.Service)
+	t = time.Now()
 	logs, err := p.Sumo.Search(query, w.Start, w.End, logLimit)
+	telemetry.RecordSumoLogicDuration(ctx, time.Since(t))
 	if err != nil {
 		bundle.Warnings = append(bundle.Warnings, "Sumo Logic logs unavailable: "+err.Error())
 	}
 	sort.SliceStable(logs, func(i, j int) bool { return logs[i].Timestamps.Before(logs[j].Timestamps) })
 	bundle.Logs = logs
 
+	t = time.Now()
 	analysis, err := p.LLM.Analyze(ctx, reasoner.BuildPrompt(bundle))
+	telemetry.RecordLLMDuration(ctx, time.Since(t))
 	if err != nil {
 		return fmt.Errorf("llm analysis: %w", err)
 	}

@@ -33,6 +33,10 @@ func Init(cfg *config.Config) func() {
 	shutdownTrace := initTracer(cfg, res)
 	shutdownMeter := initMeter(cfg, res)
 
+	if err := InitMetrics(); err != nil {
+		slog.Error("failed to init metrics", "error", err)
+	}
+
 	slog.Info("telemetry initialised",
 		"service", cfg.ServiceName,
 		"environment", cfg.Environment,

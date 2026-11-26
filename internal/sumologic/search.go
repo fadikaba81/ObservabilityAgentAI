@@ -56,7 +56,7 @@ func (c *Client) CreateSearchJob(query, from, to string) (*SearchJobResponse, er
 	}
 
 	var result SearchJobResponse
-	if err := c.doJSON(http.MethodPost, c.endpoint+"/searchJobs", body, http.StatusAccepted, &result); err != nil {
+	if err := c.doJSON(http.MethodPost, c.endpoint+"/search/jobs", body, http.StatusAccepted, &result); err != nil {
 		return nil, err
 	}
 	return &result, nil
@@ -64,7 +64,7 @@ func (c *Client) CreateSearchJob(query, from, to string) (*SearchJobResponse, er
 
 func (c *Client) GetSearchJobStatus(jobID string) (*SearchJobStatus, error) {
 	var status SearchJobStatus
-	if err := c.doJSON(http.MethodGet, fmt.Sprintf("%s/searchJobs/%s", c.endpoint, jobID), nil, http.StatusOK, &status); err != nil {
+	if err := c.doJSON(http.MethodGet, fmt.Sprintf("%s/search/jobs/%s", c.endpoint, jobID), nil, http.StatusOK, &status); err != nil {
 		return nil, err
 	}
 	return &status, nil
@@ -103,7 +103,7 @@ func (c *Client) GetSearchJobMessages(jobID string, totalCount int) ([]SearchJob
 	var all []SearchJobMessage
 
 	for offset := 0; offset < totalCount; offset += messagePageSize {
-		url := fmt.Sprintf("%s/searchJobs/%s/messages?offset=%d&limit=%d",
+		url := fmt.Sprintf("%s/search/jobs/%s/messages?offset=%d&limit=%d",
 			c.endpoint, jobID, offset, messagePageSize)
 
 		var page SearchJobMessageResponse

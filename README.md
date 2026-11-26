@@ -1,8 +1,8 @@
 # ObservabilityAgentAI
 
-An AI-powered observability agent written in Go. When a Sumo Logic alert fires, the agent reads the alert (app and time window), pulls metrics and slow traces from **New Relic** and error logs from **Sumo Logic** for that app and window, asks Claude to identify the likely issue and recommendations, and emails the result to the SRE.
+An AI-powered observability agent written in Go. When a Sumo Logic alert fires, the agent reads the alert (app and time window), pulls metrics and slow traces from **New Relic** and logs from **Sumo Logic** for that app and window, asks Claude to identify the likely issue and recommendations, and emails the result to the SRE.
 
-> **Status: proof of concept.** The full alert-to-email path is implemented. It has been unit tested against mock APIs, but not yet run against live Sumo Logic, New Relic or Anthropic accounts. See [Roadmap](#roadmap) and [Known Issues](#known-issues).
+> **Status: proof of concept.** The full alert-to-email path is implemented and has run against live New Relic and Claude accounts. Sumo Logic search is being verified. See [Roadmap](#roadmap) and [Known Issues](#known-issues).
 
 ## The Problem
 
@@ -13,7 +13,7 @@ During an incident, SREs switch between Sumo Logic (logs) and New Relic (metrics
 1. **Sumo Logic alert fires.** A webhook connection posts JSON to the agent's `/webhook` endpoint, with the app name and the alert time window.
 2. **Agent validates and accepts.** The request must carry the `X-Webhook-Secret` header. The service name is checked, duplicates are ignored, and the work runs in the background (the endpoint returns `202`).
 3. **New Relic.** The agent runs NRQL through NerdGraph for the app's request count, error percentage and duration, and for its slowest transactions with their trace IDs.
-4. **Sumo Logic.** The agent runs a search job for the app's error, exception, warning and timeout log lines in the same window, and collects up to 200 lines.
+4. **Sumo Logic.** The agent runs a search job for the app's log lines in the same window and collects up to 200 lines, oldest first.
 5. **Claude.** The alert, metrics, traces and logs go to the Anthropic Messages API. The reply is parsed into a summary, probable root cause, confidence, evidence and recommended actions.
 6. **Email.** The analysis is sent as plain text over SMTP. With `--dry-run` it is printed to the console instead.
 
@@ -43,9 +43,9 @@ Logs and metrics already reach Sumo Logic and New Relic through your existing pi
 | Entrypoint, `/webhook`, `/healthz` | `cmd/main.go` | Done |
 | Config loader and validation | `config/config.go` | Done |
 | Alert handling (auth, validation, de-duplication) | `internal/webhook/` | Done |
-| New Relic metrics and slow traces | `internal/newrelic/` | Done |
-| Sumo Logic search jobs and normalisation | `internal/sumologic/` | Done |
-| Claude analysis | `internal/reasoner/` | Done |
+| New Relic metrics and slow traces | `internal/newrelic/` | Done. Verified against a live account |
+| Sumo Logic search jobs and normalisation | `internal/sumologic/` | Done. Query is being verified against live logs |
+| Claude analysis | `internal/reasoner/` | Done. Verified against a live run |
 | Email report | `internal/output/` | Done |
 | Pipeline orchestration | `internal/pipeline/` | Done |
 | Correlation by trace ID | — | Not started. Events are sorted by time and sent as they are |
@@ -63,6 +63,8 @@ The agent can send timing metrics for each step of an alert run to New Relic, th
 | `llm.query.duration` | s | — | One Claude request |
 | `agent.run.duration` | s | — | One full alert run, from start to email or print |
 
+These metrics are recorded only when an alert runs through the pipeline. Sending a test webhook is enough to produce them.
+
 ```mermaid
 flowchart LR
     APP[ObsAIAgent] -->|OTLP HTTP :4318| COL[OTel Collector\ndeploy/local]
@@ -71,14 +73,15 @@ flowchart LR
 
 **Setup**
 
-1. In `.env`, set `OTEL_ENABLED=true` and `OTEL_ENDPOINT=http://localhost:4318`.
-2. Set `NEW_RELIC_LICENSE_KEY` in `deploy/local/.env` (the ingest license key, not the User API key), then start the Collector:
+1. In the root `.env`, set `OTEL_ENABLED=true` and `OTEL_ENDPOINT=http://localhost:4318`.
+2. Set `NEW_RELIC_LICENSE_KEY` and `SUMO_HTTP_SOURCE_URL` in the root `.env`. The collector reads them through `env_file` in `deploy/local/docker-compose.yml`. Use the New Relic ingest license key, not the User API key. The collector won't start without `SUMO_HTTP_SOURCE_URL`, even though the agent doesn't send logs through that pipeline.
+3. Start the Collector:
    ```bash
    cd deploy/local
-   docker-compose up -d
+   docker compose up -d
    ```
-   The Collector config also includes a Sumo Logic log pipeline. The agent doesn't send logs through it, so `SUMO_HTTP_SOURCE_URL` is only needed if you use that pipeline.
-3. Run an alert. Then query the metrics in New Relic:
+   On a network that inspects HTTPS traffic, mount your host's CA bundle into the collector so it trusts New Relic's certificate. See the `volumes` entry in `docker-compose.yml`.
+4. Run an alert. Then query the metrics in New Relic:
    ```
    FROM Metric SELECT average(newrelic.query.duration) FACET query TIMESERIES SINCE 1 hour ago
    ```
@@ -93,6 +96,8 @@ Metrics are sent about once a minute, and again when the agent exits. For a shor
 │   └── main.go                       # entrypoint
 ├── config/
 │   └── config.go                     # environment-based config loader
+├── deploy/
+│   └── local/                        # OTel Collector and docker-compose
 ├── internal/
 │   ├── newrelic/                     # New Relic NerdGraph client
 │   │   ├── client.go
@@ -113,7 +118,6 @@ Metrics are sent about once a minute, and again when the agent exits. For a shor
 │   └── models/
 │       ├── alerts.go                 # inbound alert payload
 │       └── events.go                 # normalised Event type
-├── .env.example                      # template for local configuration
 ├── go.mod
 └── go.sum
 ```
@@ -124,13 +128,13 @@ Metrics are sent about once a minute, and again when the agent exits. For a shor
 
 - Go 1.25.5 (as declared in `go.mod`)
 - A Sumo Logic access ID and key with Search Job API access, and an alert that can call a webhook
-- A New Relic **User API key** (for NerdGraph) and your account ID
+- A New Relic **User API key** (for NerdGraph), your account ID, and an **ingest license key** (for the collector)
 - An Anthropic API key
-- An SMTP account for sending email (Gmail needs an app password)
+- An SMTP account for sending email (Gmail needs an app password). Some networks block outbound port 587
 
 ### Configuration
 
-Copy `.env.example` to `.env` and fill it in. Do not commit `.env`.
+Create a `.env` file in the repo root with the variables below. Do not commit it.
 
 | Variable | Required | Default | Purpose |
 |---|---|---|---|
@@ -141,8 +145,10 @@ Copy `.env.example` to `.env` and fill it in. Do not commit `.env`.
 | `SUMOLOGIC_ACCESSKEY_SANDBOX` | yes | — | Sumo Logic access key |
 | `SUMOLOGIC_ENDPOINT` | no | `https://api.sumologic.com/api/v1` | Use your deployment, e.g. `https://api.au.sumologic.com/api/v1` for Australia |
 | `SUMO_SERVICE_FIELD` | no | `service` | Log field that holds the app name |
+| `SUMO_HTTP_SOURCE_URL` | yes for the collector | — | Sumo HTTP source URL, used by `deploy/local` |
 | `NEWRELIC_APIKEY_SANDBOX` | yes | — | New Relic **User API key** (not the ingest licence key) |
 | `NEWRELIC_ACCOUNTID_SANDBOX` | yes | — | New Relic account ID |
+| `NEW_RELIC_LICENSE_KEY` | for the collector | — | New Relic **ingest** license key, used by `deploy/local` |
 | `QUERY_WINDOW` | no | `15m` | Look-back used when the alert has no window |
 | `DRY_RUN` | no | `false` | Print the report instead of emailing it |
 | `EMAIL_TO` | yes unless dry run | — | Recipient(s), comma separated |
@@ -170,7 +176,7 @@ go build -o obsaiagent ./cmd
 
 ### Configure the Sumo Logic Alert
 
-Create a webhook connection in Sumo Logic that POSTs to `https://<agent-host>/webhook`, and attach it to the alert. Add the header `X-Webhook-Secret` with the value of `WEBHOOK_SECRET`.
+Create a webhook connection in Sumo Logic that POSTs to `https://<agent-host>/webhook`, and attach it to the alert. Add the header `X-Webhook-Secret` with the value of `WEBHOOK_SECRET`. Sumo's webhook connection must support custom headers.
 
 The JSON payload should include:
 
@@ -190,7 +196,7 @@ The agent must be reachable from Sumo's cloud, so it needs a public HTTPS endpoi
 | 1 | Done | Data clients: Sumo Logic and New Relic |
 | 2 | Done | Alert webhook: authentication, validation, de-duplication, background pipeline |
 | 3 | Done | Analysis and delivery: Claude summary, email report, dry-run mode |
-| 4 | Pending | Live testing against Sumo Logic, New Relic and Anthropic accounts |
+| 4 | Partly done | Live testing: New Relic and Claude verified. Sumo Logic search and email delivery still to be confirmed |
 | 5 | Pending | Correlator: group logs and traces by trace ID and time |
 | 6 | Pending | Slack or PagerDuty output |
 | 7 | Partly done | OpenTelemetry: latency metrics are in place (see [Latency Metrics](#latency-metrics)). Agent traces are not yet added |
@@ -198,10 +204,9 @@ The agent must be reachable from Sumo's cloud, so it needs a public HTTPS endpoi
 
 ## Known Issues
 
-- **Not tested against live services.** Only mock-server unit tests have run. Check the NRQL attribute names (`traceId`, `error`) and the Sumo field name in your accounts first.
+- **Sumo query is not general yet.** The search is being tested against one source category and a JSON `service` field. It should be made configurable per app before wider use.
 - **Port 465 (implicit TLS) is not supported.** `SMTP_PORT` must be a STARTTLS port such as 587.
 - **No retries on Sumo or New Relic.** A transient error becomes a warning in the report.
 - **Concurrency is unbounded.** Each alert starts its own goroutine. Add a limit before running many alerts at once.
-- **Build not run on the full module set.** The code is checked with `gofmt`, `go vet` and mock tests. Run `go build ./...` and `go test ./...` on a machine with module access.
+- **Build not run on the full module set.** Run `go build ./...` and `go test ./...` on a machine with module access.
 - **Dependency on OpenTelemetry packages.** `internal/telemetry` still imports the OTel modules. They are only used when `OTEL_ENABLED=true`.
-

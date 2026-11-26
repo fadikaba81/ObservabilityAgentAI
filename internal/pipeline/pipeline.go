@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"sort"
 	"time"
+	"os"
 
 	"github.com/fadikaba81/ObservabilityAgentAI/internal/newrelic"
 	"github.com/fadikaba81/ObservabilityAgentAI/internal/output"
@@ -14,6 +15,8 @@ import (
 	"github.com/fadikaba81/ObservabilityAgentAI/internal/sumologic"
 	"github.com/fadikaba81/ObservabilityAgentAI/internal/telemetry"
 	"github.com/fadikaba81/ObservabilityAgentAI/pkg/models"
+
+	"go.opentelemetry.io/otel"
 )
 
 const (
@@ -38,6 +41,9 @@ type Pipeline struct {
 // Run processes one alert. Failures in New Relic or Sumo are recorded as
 // warnings and the analysis proceeds with whatever data was collected.
 func (p *Pipeline) Run(ctx context.Context, alert models.Alert) error {
+	ctx, span := otel.Tracer("observabilityagentai").Start(ctx, "pipeline.run")
+	defer span.End()
+
 	started := time.Now()
 	defer func() { telemetry.RecordAgentDuration(ctx, time.Since(started)) }()
 
@@ -65,7 +71,7 @@ func (p *Pipeline) Run(ctx context.Context, alert models.Alert) error {
 	}
 	bundle.Traces = traces
 
-	query := fmt.Sprintf(`%s="%s" (error OR exception OR warn OR timeout OR fatal)`, p.ServiceField, alert.Service)
+	query := `_sourceCategory=order-api/prod | json auto | where service = "order-api"`
 	t = time.Now()
 	logs, err := p.Sumo.Search(query, w.Start, w.End, logLimit)
 	telemetry.RecordSumoLogicDuration(ctx, time.Since(t))
@@ -85,8 +91,8 @@ func (p *Pipeline) Run(ctx context.Context, alert models.Alert) error {
 	subject, body := output.RenderReport(alert.Name, alert.Service, w.Start, w.End, analysis, bundle.Warnings)
 	if p.DryRun {
 		fmt.Fprintf(p.Out, "Subject: %s\n\n%s", subject, body)
-	} else if err := p.Mailer.Send(subject, body); err != nil {
-		return fmt.Errorf("send email: %w", err)
+	} else if err := os.WriteFile(fmt.Sprintf("report-%s.md", alert.ID), []byte("# "+subject+"\n\n"+body), 0644); err != nil {
+		return fmt.Errorf("write report: %w", err)
 	}
 
 	slog.Info("pipeline.done", "alert_id", alert.ID, "service", alert.Service,
